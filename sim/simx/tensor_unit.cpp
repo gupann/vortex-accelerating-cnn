@@ -72,6 +72,18 @@ struct FMA<vt::bf16, vt::fp32> {
 };
 
 template <>
+struct FMA<vt::tf32, vt::fp32> {
+  static float eval(uint32_t a, uint32_t b, float c) {
+    auto xa  = rv_xtof_s(a, 8, 10, 0, nullptr);
+    auto xb  = rv_xtof_s(b, 8, 10, 0, nullptr);
+    auto xab = rv_fmul_s(xa, xb, 0, nullptr);
+    auto xc  = bit_cast<uint32_t>(c);
+    auto xd  = rv_fadd_s(xab, xc, 0, nullptr);
+    return bit_cast<float>(xd);
+  }
+};
+
+template <>
 struct FMA<vt::bf16, vt::bf16> {
   static uint16_t eval(uint16_t a, uint16_t b, uint16_t c) {
     auto xa = rv_btof_s(a, 0, nullptr);
