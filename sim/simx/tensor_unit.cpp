@@ -164,6 +164,8 @@ static PFN_FEDP select_FEDP(uint32_t IT, uint32_t OT) {
       return FEDP<vt::fp16, vt::fp32>::eval;
     case vt::bf16::id:
       return FEDP<vt::bf16, vt::fp32>::eval;
+    case vt::tf32::id:
+      return FEDP<vt::tf32, vt::fp32>::eval;
     default:
       std::cout << "Error: unsupported mma format: " << IT << " -> " << OT << "!" << std::endl;
       std::abort();
