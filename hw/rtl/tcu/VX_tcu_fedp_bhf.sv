@@ -55,6 +55,18 @@ module VX_tcu_fedp_bhf #(
         assign b_col16[2*i+1] = b_col[i][31:16];
     end
 
+    // shilpa changed
+    wire [TCK-1:0][31:0] a_row32;
+    wire [TCK-1:0][31:0] b_col32;
+
+    for (genvar i = 0; i < N; i++) begin : g_unpack32
+        assign a_row32[2*i]   = a_row[i];
+        assign a_row32[2*i+1] = 32'd0;
+        assign b_col32[2*i]   = b_col[i];
+        assign b_col32[2*i+1] = 32'd0;
+    end
+    // shilpa changed end
+
     // Transprecision Multiply
 
     wire [2:0] fmt_s_delayed;
@@ -75,6 +87,7 @@ module VX_tcu_fedp_bhf #(
     for (genvar i = 0; i < TCK; i++) begin : g_prod
         wire [32:0] mult_result_fp16;
         wire [32:0] mult_result_bf16;
+        wire [32:0] mult_result_tf32; // shilpa changed
 
         // FP16 multiplication
         VX_tcu_bhf_fmul #(
@@ -118,11 +131,33 @@ module VX_tcu_fedp_bhf #(
             `UNUSED_PIN(fflags)
         );
 
+        // TF32 multiplication - shilpa changed
+        VX_tcu_bhf_fmul #(
+            .IN_EXPW (8),
+            .IN_SIGW (10+1),   // 10 mantissa bits + implicit leading bit
+            .OUT_EXPW(8),
+            .OUT_SIGW(24),     // match fp32 accumulator (23 frac + implicit -> 24)
+            .IN_REC  (0),      // input in IEEE format (packed)
+            .OUT_REC (1),      // output in recoded format (as other instances)
+            .MUL_LATENCY (FMUL_LATENCY),
+            .RND_LATENCY (FRND_LATENCY)
+        ) tf32_mul (
+            .clk    (clk),
+            .reset  (reset),
+            .enable (enable),
+            .frm    (frm),
+            .a      (a_row32[i]),
+            .b      (b_col32[i]),
+            .y      (mult_result_tf32),
+            `UNUSED_PIN(fflags)
+        );
+
         logic [32:0] mult_result_mux;
         always_comb begin
             case(fmt_s_delayed)
                 3'd1: mult_result_mux = mult_result_fp16;
                 3'd2: mult_result_mux = mult_result_bf16;
+                3'd3: mult_result_mux = mult_result_tf32; // shilpa changed
                 default: mult_result_mux = 'x;
             endcase
         end
