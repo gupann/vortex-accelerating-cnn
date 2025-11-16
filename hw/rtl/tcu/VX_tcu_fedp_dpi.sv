@@ -64,6 +64,7 @@ module VX_tcu_fedp_dpi #(
                     dpi_fmadd(enable, int'(0), a_f, b_f, xprod, 3'b0, xprod, fflags);
                 end
             end
+            
             default: begin
                 xprod = 'x;
             end
