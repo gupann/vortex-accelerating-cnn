@@ -75,6 +75,7 @@ module VX_tcu_fedp_bhf #(
     for (genvar i = 0; i < TCK; i++) begin : g_prod
         wire [32:0] mult_result_fp16;
         wire [32:0] mult_result_bf16;
+        wire [32:0] mult_result_tf32; // shilpa changed
 
         // FP16 multiplication
         VX_tcu_bhf_fmul #(
@@ -118,11 +119,42 @@ module VX_tcu_fedp_bhf #(
             `UNUSED_PIN(fflags)
         );
 
+        // TF32 multiplication - shilpa changed
+        logic [32:0] mult_result_tf32_int;
+        if ((i % 2) == 0) begin : g_tf32_mul
+        // use lower 19 bits (1+8+10) from each 32-bit TF32 element
+            VX_tcu_bhf_fmul #(
+                    .IN_EXPW (8),
+                    .IN_SIGW (10+1),
+                    .OUT_EXPW(8),
+                    .OUT_SIGW(24),
+                    .IN_REC (0), // input in IEEE format
+                    .OUT_REC (1), // output in recoded format
+                    .MUL_LATENCY (FMUL_LATENCY),
+                    .RND_LATENCY (FRND_LATENCY)
+            ) tf32_mul (
+                .clk    (clk),
+                .reset  (reset),
+                .enable (enable),
+                .frm    (frm),
+                .a      (a_row[i/2][18:0]),
+                .b      (b_col[i/2][18:0]),
+                .y      (mult_result_tf32_int),
+                `UNUSED_PIN(fflags)
+            );
+        end else begin : g_tf32_zero
+            assign mult_result_tf32_int = '0; // interleave with zeroes 
+        end
+
+        assign mult_result_tf32 = mult_result_tf32_int; // both zeroes and multiplication for the next stage
+        // end shilpa changed
+
         logic [32:0] mult_result_mux;
         always_comb begin
             case(fmt_s_delayed)
                 3'd1: mult_result_mux = mult_result_fp16;
                 3'd2: mult_result_mux = mult_result_bf16;
+                3'd3: mult_result_mux = mult_result_tf32; // shilpa changed
                 default: mult_result_mux = 'x;
             endcase
         end
