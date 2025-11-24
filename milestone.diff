@@ -1,0 +1,1250 @@
+diff --git a/tests/regression/cnn_conv/Makefile b/tests/regression/cnn_conv/Makefile
+new file mode 100644
+index 000000000..12c45da03
+--- /dev/null
++++ b/tests/regression/cnn_conv/Makefile
+@@ -0,0 +1,15 @@
++ROOT_DIR := $(realpath ../../..)
++include $(ROOT_DIR)/config.mk
++
++PROJECT := cnn_conv
++SRC_DIR := $(VORTEX_HOME)/tests/regression/$(PROJECT)
++
++# Host program
++SRCS := $(SRC_DIR)/main_old.cpp
++
++# Device kernels (all compiled into one kernel.elf)
++VX_SRCS := \
++    $(SRC_DIR)/kernel_conv.cpp \
++
++include ../common.mk
++
+diff --git a/tests/regression/cnn_conv/common.h b/tests/regression/cnn_conv/common.h
+new file mode 100644
+index 000000000..8ce10321b
+--- /dev/null
++++ b/tests/regression/cnn_conv/common.h
+@@ -0,0 +1,54 @@
++#ifndef _COMMON_H_
++#define _COMMON_H_
++
++#ifndef TYPE
++#define TYPE float   // can be overridden at compile time
++#endif
++
++#include <stdint.h>
++
++typedef struct {
++  // Device pointers
++  uint64_t I_addr;   // Input address [C_in][H][W]
++  uint64_t W_addr;   // Weight address [C_out][C_in][3][3]
++  uint64_t O_addr;   // Output address [C_out][H_out][W_out]
++
++  // Convolution parameters
++  uint32_t C_in;     // Input channels
++  uint32_t C_out;    // Output channels
++  uint32_t height;   // Input height
++  uint32_t width;    // Input width
++  uint32_t padding;  // Padding (same on all sides)
++  uint32_t stride;   // Stride (currently assumed square)
++  
++  // Derived output dimensions
++  uint32_t H_out;
++  uint32_t W_out;
++
++  // Execution configuration
++  uint32_t grid_dim[3];   // [W_out, H_out, C_out]
++  uint32_t block_dim[3];  // (not used in Vortex, but included for compatibility)
++
++  // Flags
++  uint32_t use_lmem;      // 1: copy weights into local memory, 0: use device memory
++} kernel_arg_t;
++
++typedef struct {
++    uint64_t X_addr;     // Activation in/out (in-place)
++    uint32_t total;      // Total elements = C×H×W
++    uint32_t grid_dim[3];
++    uint32_t block_dim[3];
++} kernel_arg_relu_t;
++
++typedef struct {
++    uint64_t I_addr;
++    uint64_t O_addr;
++    uint32_t C;
++    uint32_t H;
++    uint32_t W;
++    uint32_t grid_dim[3];
++    uint32_t block_dim[3];
++} kernel_arg_pool_t;
++
++
++#endif // _COMMON_H_
+diff --git a/tests/regression/cnn_conv/kernel_conv.cpp b/tests/regression/cnn_conv/kernel_conv.cpp
+new file mode 100644
+index 000000000..4f5ffec39
+--- /dev/null
++++ b/tests/regression/cnn_conv/kernel_conv.cpp
+@@ -0,0 +1,74 @@
++#include <vx_spawn.h>
++#include "common.h"
++#include <cstdio> 
++
++void kernel_body(kernel_arg_t* __UNIFORM__ arg) {
++    auto I = reinterpret_cast<TYPE*>(arg->I_addr);
++    auto W = reinterpret_cast<TYPE*>(arg->use_lmem ? __local_mem(0) : (void*)arg->W_addr);
++    auto O = reinterpret_cast<TYPE*>(arg->O_addr);
++
++    const int C_in    = arg->C_in;
++    const int C_out   = arg->C_out;
++    const int H       = arg->height;
++    const int Wt      = arg->width;
++    const int padding = arg->padding;
++    const int stride  = arg->stride;
++
++    const int K = 3;
++
++    const int H_out = arg->H_out;
++    const int W_out = arg->W_out;
++
++    // Thread's output coordinates:
++    int ox = blockIdx.x;  // output x (width)
++    int oy = blockIdx.y;  // output y (height)
++
++    if (ox >= W_out || oy >= H_out)
++        return;
++
++    float sum = 0.0f;
++
++    for (int oc = 0; oc < C_out; ++oc) {
++        float sum = 0.0f;
++        // Loop over input channels and 3x3 kernel
++        for (int ic = 0; ic < C_in; ++ic) {
++            for (int ky = 0; ky < K; ++ky) {
++                for (int kx = 0; kx < K; ++kx) {
++                    int in_y = oy * stride + ky - padding;
++                    int in_x = ox * stride + kx - padding;
++
++                    // Zero-padding by skipping out-of-bounds
++                    if (in_y >= 0 && in_y < H && in_x >= 0 && in_x < Wt) {
++                        int in_idx = ic * H * Wt + in_y * Wt + in_x;
++                        int wt_idx = ((oc * C_in + ic) * K + ky) * K + kx;
++
++                        sum += I[in_idx] * W[wt_idx];
++                    }
++                }
++            }
++        }
++        // Store result: [C_out][H_out][W_out]
++        int out_idx = oc * H_out * W_out + oy * W_out + ox;
++        O[out_idx] = static_cast<TYPE>(sum);
++    }
++}
++
++int main() {
++    kernel_arg_t* arg = (kernel_arg_t*)csr_read(VX_CSR_MSCRATCH);
++    // printf("DEVICE sizeof(kernel_arg_t) = %d\n", sizeof(kernel_arg_t));
++    // printf("Test printing inside kernel.cpp\n");
++    if (arg->use_lmem) {
++        // Copy all weights to local memory
++        auto W_global = reinterpret_cast<TYPE*>(arg->W_addr);
++        auto W_local  = reinterpret_cast<TYPE*>(__local_mem(0));
++
++        int total_w = arg->C_out * arg->C_in * 3 * 3;
++        for (int i = 0; i < total_w; ++i) {
++            W_local[i] = W_global[i];
++        }
++    }
++
++    // Launch threads: grid_dim was filled by host
++    return vx_spawn_threads(2, arg->grid_dim, arg->block_dim,
++                            (vx_kernel_func_cb)kernel_body, arg);
++}
+diff --git a/tests/regression/cnn_conv/main.cpp b/tests/regression/cnn_conv/main.cpp
+new file mode 100644
+index 000000000..248eaee21
+--- /dev/null
++++ b/tests/regression/cnn_conv/main.cpp
+@@ -0,0 +1,358 @@
++// main_conv_layer.cpp
++#include <iostream>
++#include <unistd.h>
++#include <string.h>
++#include <vector>
++#include <chrono>
++#include <vortex.h>
++#include <cmath>
++#include <cstdlib>
++
++#include "common.h"
++
++#define FLOAT_ULP 6
++
++#define RT_CHECK(_expr)                                         \
++   do {                                                         \
++     int _ret = _expr;                                          \
++     if (0 == _ret)                                             \
++       break;                                                   \
++     printf("Error: '%s' returned %d!\n", #_expr, (int)_ret);   \
++     cleanup();                                                 \
++     exit(-1);                                                  \
++   } while (false)
++
++// -----------------------------------------------------------------------------
++// Configuration: 
++// -----------------------------------------------------------------------------
++
++static const int C_IN  = 3;   // number of input channels
++static const int C_OUT = 4;   // number of output channels
++static const int K     = 3;   // kernel size
++
++// -----------------------------------------------------------------------------
++// Comparators
++// -----------------------------------------------------------------------------
++
++template <typename Type>
++class Comparator {};
++
++template <>
++class Comparator<int> {
++public:
++  static const char* type_str() { return "integer"; }
++  static int generate() { return rand(); }
++  static bool compare(int a, int b, int index, int errors) {
++    if (a != b) {
++      if (errors < 100) {
++        printf("*** error: [%d] expected=%d, actual=%d\n", index, b, a);
++      }
++      return false;
++    }
++    return true;
++  }
++};
++
++template <>
++class Comparator<float> {
++public:
++  static const char* type_str() { return "float"; }
++  static float generate() {
++    return static_cast<float>(rand()) / RAND_MAX;
++  }
++  static bool compare(float a, float b, int index, int errors) {
++    union fi_t { float f; int32_t i; };
++    fi_t fa, fb;
++    fa.f = a;
++    fb.f = b;
++    auto d = std::abs(fa.i - fb.i);
++    if (d > FLOAT_ULP) {
++      if (errors < 100) {
++        printf("*** error: [%d] expected=%f, actual=%f\n", index, b, a);
++      }
++      return false;
++    }
++    return true;
++  }
++};
++
++// -----------------------------------------------------------------------------
++// CPU reference implementation: multi-channel 3x3 conv, N=1
++// I: [C_in][H][W], W: [C_out][C_in][3][3], O: [C_out][H_out][W_out]
++// -----------------------------------------------------------------------------
++
++static void convolution_cpu(TYPE *O,
++                            const TYPE *I,
++                            const TYPE *W,
++                            int32_t C_in,
++                            int32_t C_out,
++                            int32_t H,
++                            int32_t Wt,
++                            int32_t padding,
++                            int32_t stride) {
++  const int K = 3;
++  int H_out = (H + 2*padding - K) / stride + 1;
++  int W_out = (Wt + 2*padding - K) / stride + 1;
++
++  for (int oc = 0; oc < C_out; ++oc) {
++    for (int oy = 0; oy < H_out; ++oy) {
++      for (int ox = 0; ox < W_out; ++ox) {
++        float sum = 0.0f;
++
++        for (int ic = 0; ic < C_in; ++ic) {
++          for (int ky = 0; ky < K; ++ky) {
++            for (int kx = 0; kx < K; ++kx) {
++              int in_y = oy * stride + ky - padding;
++              int in_x = ox * stride + kx - padding;
++
++              if (in_y >= 0 && in_y < H && in_x >= 0 && in_x < Wt) {
++                int in_idx = ic * H * Wt + in_y * Wt + in_x;
++                int wt_idx = ((oc * C_in + ic) * K + ky) * K + kx;
++                sum += I[in_idx] * W[wt_idx];
++              }
++            }
++          }
++        }
++
++        int out_idx = oc * H_out * W_out + oy * W_out + ox;
++        O[out_idx] = static_cast<TYPE>(sum);
++      }
++    }
++  }
++}
++
++// -----------------------------------------------------------------------------
++// Globals for device resources
++// -----------------------------------------------------------------------------
++
++const char* kernel_file = "kernel.vxbin";  // compiled from kernel.cpp
++int size = 32;                             // input height=width
++bool use_lmem = false;
++
++vx_device_h device = nullptr;
++vx_buffer_h I_buffer = nullptr;
++vx_buffer_h W_buffer = nullptr;
++vx_buffer_h O_buffer = nullptr;
++vx_buffer_h krnl_buffer = nullptr;
++vx_buffer_h args_buffer = nullptr;
++kernel_arg_t kernel_arg = {};
++
++static void show_usage() {
++  std::cout << "Vortex Conv Layer Test." << std::endl;
++  std::cout << "Usage: [-k kernel] [-l: local memory] [-n size] [-h|?: help]" << std::endl;
++}
++
++static void parse_args(int argc, char **argv) {
++  int c;
++  while ((c = getopt(argc, argv, "n:k:lh")) != -1) {
++    switch (c) {
++    case 'n':
++      size = atoi(optarg);
++      break;
++    case 'l':
++      use_lmem = true;
++      break;
++    case 'k':
++      kernel_file = optarg;
++      break;
++    case 'h':
++      show_usage();
++      exit(0);
++      break;
++    default:
++      show_usage();
++      exit(-1);
++    }
++  }
++}
++
++void cleanup() {
++  if (device) {
++    vx_mem_free(I_buffer);
++    vx_mem_free(W_buffer);
++    vx_mem_free(O_buffer);
++    vx_mem_free(krnl_buffer);
++    vx_mem_free(args_buffer);
++    vx_dev_close(device);
++  }
++}
++
++// -----------------------------------------------------------------------------
++// main
++// -----------------------------------------------------------------------------
++
++int main(int argc, char *argv[]) {
++  // parse command arguments
++  parse_args(argc, argv);
++
++  std::srand(50);
++
++  // open device connection
++  std::cout << "open device connection" << std::endl;
++  RT_CHECK(vx_dev_open(&device));
++
++  std::cout << "data type: " << Comparator<TYPE>::type_str() << std::endl;
++  std::cout << "input size: " << size << "x" << size
++            << ", C_in=" << C_IN
++            << ", C_out=" << C_OUT << std::endl;
++
++  // convolution parameters
++  int padding = 1;
++  int stride  = 1;
++  int H = size;
++  int Wt = size;
++
++  int H_out = (H + 2*padding - K) / stride + 1;
++  int W_out = (Wt + 2*padding - K) / stride + 1;
++
++  // Setup kernel_arg
++  kernel_arg.C_in   = C_IN;
++  kernel_arg.C_out  = C_OUT;
++  kernel_arg.height = H;
++  kernel_arg.width  = Wt;
++  kernel_arg.padding = padding;
++  kernel_arg.stride  = stride;
++  kernel_arg.H_out   = H_out;
++  kernel_arg.W_out   = W_out;
++  kernel_arg.use_lmem = use_lmem;
++
++  // grid_dim = [W_out, H_out, C_out]
++  kernel_arg.grid_dim[0] = W_out;
++  kernel_arg.grid_dim[1] = H_out;
++  kernel_arg.grid_dim[2] = C_OUT;
++  kernel_arg.block_dim[0] = 1;
++  kernel_arg.block_dim[1] = 1;
++  kernel_arg.block_dim[2] = 1;
++
++  uint32_t i_points = C_IN  * H     * Wt;
++  uint32_t w_points = C_OUT * C_IN * K * K;
++  uint32_t o_points = C_OUT * H_out * W_out;
++
++  // allocate device memory
++  std::cout << "allocate device memory" << std::endl;
++  size_t i_nbytes = i_points * sizeof(TYPE);
++  size_t w_nbytes = w_points * sizeof(TYPE);
++  size_t o_nbytes = o_points * sizeof(TYPE);
++
++  RT_CHECK(vx_mem_alloc(device, i_nbytes, VX_MEM_READ,  &I_buffer));
++  RT_CHECK(vx_mem_address(I_buffer, &kernel_arg.I_addr));
++
++  RT_CHECK(vx_mem_alloc(device, w_nbytes, VX_MEM_READ,  &W_buffer));
++  RT_CHECK(vx_mem_address(W_buffer, &kernel_arg.W_addr));
++
++  RT_CHECK(vx_mem_alloc(device, o_nbytes, VX_MEM_WRITE, &O_buffer));
++  RT_CHECK(vx_mem_address(O_buffer, &kernel_arg.O_addr));
++
++  if (use_lmem) {
++    uint64_t dev_local_mem_size;
++    RT_CHECK(vx_dev_caps(device, VX_CAPS_LOCAL_MEM_SIZE, &dev_local_mem_size));
++    if (w_nbytes > dev_local_mem_size) {
++      std::cout << "Error: Not enough local memory: needed="
++                << w_nbytes << ", available=" << dev_local_mem_size << std::endl;
++      cleanup();
++      return 1;
++    }
++  }
++
++  std::cout << "dev_argI=0x" << std::hex << kernel_arg.I_addr << std::endl;
++  std::cout << "dev_argW=0x" << std::hex << kernel_arg.W_addr << std::endl;
++  std::cout << "dev_argO=0x" << std::hex << kernel_arg.O_addr << std::endl;
++
++  // Host buffers
++  std::vector<TYPE> h_I(i_points);
++  std::vector<TYPE> h_W(w_points);
++  std::vector<TYPE> h_O(o_points);
++
++  // Generate random input: I[c, y, x]
++  for (int ic = 0; ic < C_IN; ++ic) {
++    for (int y = 0; y < H; ++y) {
++      for (int x = 0; x < Wt; ++x) {
++        int idx = ic * H * Wt + y * Wt + x;
++        h_I[idx] = static_cast<TYPE>(rand()) / RAND_MAX;
++      }
++    }
++  }
++
++  // Generate random weights: W[oc, ic, ky, kx]
++  for (int oc = 0; oc < C_OUT; ++oc) {
++    for (int ic = 0; ic < C_IN; ++ic) {
++      for (int ky = 0; ky < K; ++ky) {
++        for (int kx = 0; kx < K; ++kx) {
++          int idx = ((oc * C_IN + ic) * K + ky) * K + kx;
++          h_W[idx] = static_cast<TYPE>(rand()) / RAND_MAX;
++        }
++      }
++    }
++  }
++
++  // upload input buffer
++  {
++    std::cout << "upload source buffer" << std::endl;
++    RT_CHECK(vx_copy_to_dev(I_buffer, h_I.data(), 0, i_nbytes));
++  }
++
++  // upload weight buffer
++  {
++    std::cout << "upload weight buffer" << std::endl;
++    RT_CHECK(vx_copy_to_dev(W_buffer, h_W.data(), 0, w_nbytes));
++  }
++
++  // Upload kernel binary
++  std::cout << "Upload kernel binary" << std::endl;
++  RT_CHECK(vx_upload_kernel_file(device, kernel_file, &krnl_buffer));
++
++  // upload kernel argument
++  std::cout << "upload kernel argument" << std::endl;
++  RT_CHECK(vx_upload_bytes(device, &kernel_arg, sizeof(kernel_arg_t), &args_buffer));
++  printf("HOST sizeof(kernel_arg_t) = %zu\n", sizeof(kernel_arg_t));
++
++
++  auto time_start = std::chrono::high_resolution_clock::now();
++
++  // start device
++  std::cout << "start device" << std::endl;
++  RT_CHECK(vx_start(device, krnl_buffer, args_buffer));
++
++  // wait for completion
++  std::cout << "wait for completion" << std::endl;
++  RT_CHECK(vx_ready_wait(device, VX_MAX_TIMEOUT));
++
++  auto time_end = std::chrono::high_resolution_clock::now();
++  double elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(time_end - time_start).count();
++  printf("Elapsed time: %lg ms\n", elapsed);
++
++  // download destination buffer
++  std::cout << "download destination buffer" << std::endl;
++  RT_CHECK(vx_copy_from_dev(h_O.data(), O_buffer, 0, o_nbytes));
++
++  // verify result
++  std::cout << "verify result" << std::endl;
++  int errors = 0;
++  {
++    std::vector<TYPE> h_ref(o_points);
++    convolution_cpu(h_ref.data(), h_I.data(), h_W.data(),
++                    C_IN, C_OUT, H, Wt, padding, stride);
++
++    for (uint32_t i = 0; i < h_ref.size(); ++i) {
++      auto ref = h_ref[i];
++      auto cur = h_O[i];
++      if (!Comparator<TYPE>::compare(cur, ref, i, errors)) {
++        ++errors;
++      }
++    }
++    std::cout << "Total testing " << std::dec << h_ref.size() << " elements" << std::endl;
++  }
++
++  // cleanup
++  std::cout << "cleanup" << std::endl;
++  cleanup();
++
++  if (errors != 0) {
++    std::cout << "Found " << std::dec << errors << " errors!" << std::endl;
++    std::cout << "FAILED!" << std::endl;
++    return errors;
++  }
++
++  std::cout << "PASSED!" << std::endl;
++  return 0;
++}
+diff --git a/tests/regression/cnn_conv/main_all.cpp b/tests/regression/cnn_conv/main_all.cpp
+new file mode 100644
+index 000000000..b55999004
+--- /dev/null
++++ b/tests/regression/cnn_conv/main_all.cpp
+@@ -0,0 +1,300 @@
++// main_cnn.cpp
++#include <iostream>
++#include <unistd.h>
++#include <vector>
++#include <chrono>
++#include <cmath>
++#include <vortex.h>
++
++#include "common.h"
++
++#define FLOAT_ULP 6
++
++#define RT_CHECK(_expr) do {                       \
++    int _ret = _expr;                              \
++    if (_ret) {                                    \
++        printf("Error: %s returned %d\n",          \
++               #_expr, _ret);                      \
++        cleanup();                                 \
++        exit(-1);                                  \
++    }                                              \
++} while (false)
++
++// ------------------------------------------------------------
++// Layer sizes — simplest real CNN possible
++// ------------------------------------------------------------
++static const int C_IN  = 3;
++static const int C_OUT = 4;   // Conv layer output channels
++static const int K     = 3;
++
++static const int INPUT_SIZE = 32;   // H = W = 32
++
++// ------------------------------------------------------------
++// CPU reference functionality (conv → relu → pool)
++// ------------------------------------------------------------
++
++static void conv_cpu(
++    std::vector<float>& O,
++    const std::vector<float>& I,
++    const std::vector<float>& W,
++    int C_in, int C_out, int H, int Wt,
++    int padding, int stride)
++{
++    const int K = 3;
++    int H_out = (H + 2*padding - K) / stride + 1; 
++    int W_out = (Wt + 2*padding - K) / stride + 1;
++
++    for (int oc = 0; oc < C_out; oc++) {
++        for (int oy = 0; oy < H_out; oy++) {
++            for (int ox = 0; ox < W_out; ox++) {
++
++                float sum = 0.0f;
++
++                for (int ic = 0; ic < C_in; ic++) {
++                    for (int ky = 0; ky < K; ky++) {
++                        for (int kx = 0; kx < K; kx++) {
++
++                            int iy = oy - padding + ky;
++                            int ix = ox - padding + kx;
++
++                            if (iy >= 0 && iy < H && ix >= 0 && ix < Wt) {
++                                int in_idx = ic*H*Wt + iy*Wt + ix;
++                                int wt_idx = ((oc*C_in + ic)*K + ky)*K + kx;
++                                sum += I[in_idx] * W[wt_idx];
++                            }
++                        }
++                    }
++                }
++
++                O[oc*H_out*W_out + oy*W_out + ox] = sum;
++            }
++        }
++    }
++}
++
++static void relu_cpu(std::vector<float>& X) {
++    for (auto& v : X)
++        if (v < 0) v = 0;
++}
++
++static void maxpool_cpu(
++    std::vector<float>& O,
++    const std::vector<float>& I,
++    int C, int H, int W)
++{
++    int H_out = H / 2;
++    int W_out = W / 2;
++
++    for (int oc = 0; oc < C; oc++) {
++        for (int oy = 0; oy < H_out; oy++) {
++            for (int ox = 0; ox < W_out; ox++) {
++
++                float m = -1e30f;
++
++                for (int ky = 0; ky < 2; ky++) {
++                    for (int kx = 0; kx < 2; kx++) {
++                        int iy = 2*oy + ky;
++                        int ix = 2*ox + kx;
++                        float v = I[oc*H*W + iy*W + ix];
++                        if (v > m) m = v;
++                    }
++                }
++
++                O[oc*H_out*W_out + oy*W_out + ox] = m;
++            }
++        }
++    }
++}
++
++
++// ------------------------------------------------------------
++// Device globals
++// ------------------------------------------------------------
++vx_device_h device = nullptr;
++
++vx_buffer_h I_buf = nullptr;
++vx_buffer_h W_buf = nullptr;
++vx_buffer_h O1_buf = nullptr;  // conv output
++vx_buffer_h O2_buf = nullptr;  // pool output
++
++vx_buffer_h conv_bin = nullptr;
++vx_buffer_h relu_bin = nullptr;
++vx_buffer_h pool_bin = nullptr;
++
++vx_buffer_h args_buf = nullptr;
++
++// cleanup helper
++void cleanup() {
++    if (device) {
++        vx_mem_free(I_buf);
++        vx_mem_free(W_buf);
++        vx_mem_free(O1_buf);
++        vx_mem_free(O2_buf);
++        vx_mem_free(conv_bin);
++        vx_mem_free(relu_bin);
++        vx_mem_free(pool_bin);
++        vx_mem_free(args_buf);
++        vx_dev_close(device);
++    }
++}
++
++
++// ------------------------------------------------------------
++// MAIN — Pipeline: Conv → ReLU → MaxPool
++// ------------------------------------------------------------
++int main() {
++    RT_CHECK(vx_dev_open(&device));
++
++    const int H = INPUT_SIZE;
++    const int W = INPUT_SIZE;
++
++    const int padding = 1;
++    const int stride  = 1;
++
++    const int H1 = H;
++    const int W1 = W;
++    const int C1 = C_OUT;  
++
++    const int H2 = H1/2;
++    const int W2 = W1/2;
++
++    // allocate host buffers
++    std::vector<float> h_I(C_IN * H * W);
++    std::vector<float> h_W(C_OUT * C_IN * K * K);
++    std::vector<float> h_O1(C1 * H1 * W1);
++    std::vector<float> h_O2(C1 * H2 * W2);
++    std::vector<float> h_ref(C1 * H2 * W2);
++
++    // random input
++    for (auto& v : h_I) v = rand() / float(RAND_MAX);
++    for (auto& v : h_W) v = rand() / float(RAND_MAX);
++
++    // --- Allocate device memory ---
++    RT_CHECK(vx_mem_alloc(device, h_I.size()*4, VX_MEM_READ, &I_buf));
++    RT_CHECK(vx_mem_alloc(device, h_W.size()*4, VX_MEM_READ, &W_buf));
++    RT_CHECK(vx_mem_alloc(device, h_O1.size()*4, VX_MEM_WRITE, &O1_buf));
++    RT_CHECK(vx_mem_alloc(device, h_O2.size()*4, VX_MEM_WRITE, &O2_buf));
++
++    uint64_t I_addr, W_addr, O1_addr, O2_addr;
++    vx_mem_address(I_buf,  &I_addr);
++    vx_mem_address(W_buf,  &W_addr);
++    vx_mem_address(O1_buf, &O1_addr);
++    vx_mem_address(O2_buf, &O2_addr);
++
++    // upload host data to device
++    RT_CHECK(vx_copy_to_dev(I_buf, h_I.data(), 0, h_I.size()*4));
++    RT_CHECK(vx_copy_to_dev(W_buf, h_W.data(), 0, h_W.size()*4));
++
++    // load kernel binaries
++    RT_CHECK(vx_upload_kernel_file(device, "kernel_conv.vxbin",  &conv_bin));
++    RT_CHECK(vx_upload_kernel_file(device, "kernel_relu.vxbin",  &relu_bin));
++    RT_CHECK(vx_upload_kernel_file(device, "kernel_pool.vxbin",  &pool_bin));
++
++
++    // ------------------------------------------------------------
++    // 1. Run Convolution
++    // ------------------------------------------------------------
++    {
++        kernel_arg_t arg{};
++        arg.I_addr = I_addr;
++        arg.W_addr = W_addr;
++        arg.O_addr = O1_addr;
++
++        arg.C_in = C_IN;
++        arg.C_out = C_OUT;
++
++        arg.height = H;
++        arg.width  = W;
++
++        arg.padding = padding;
++        arg.stride  = stride;
++
++        arg.H_out = H1;
++        arg.W_out = W1;
++
++        arg.grid_dim[0] = W1;
++        arg.grid_dim[1] = H1;
++        arg.grid_dim[2] = 1;
++
++        RT_CHECK(vx_upload_bytes(device, &arg, sizeof(arg), &args_buf));
++        RT_CHECK(vx_start(device, conv_bin, args_buf));
++        RT_CHECK(vx_ready_wait(device, VX_MAX_TIMEOUT));
++    }
++
++
++    // ------------------------------------------------------------
++    // 2. Run ReLU (in-place)
++    // ------------------------------------------------------------
++    {
++        kernel_arg_relu_t arg{};
++        arg.X_addr = O1_addr;
++        arg.total  = C1 * H1 * W1;
++
++        arg.grid_dim[0] = arg.total;
++
++        RT_CHECK(vx_upload_bytes(device, &arg, sizeof(arg), &args_buf));
++        RT_CHECK(vx_start(device, relu_bin, args_buf));
++        RT_CHECK(vx_ready_wait(device, VX_MAX_TIMEOUT));
++    }
++
++
++    // ------------------------------------------------------------
++    // 3. Run MaxPool → O2
++    // ------------------------------------------------------------
++    {
++        kernel_arg_pool_t arg{};
++        arg.I_addr = O1_addr;
++        arg.O_addr = O2_addr;
++
++        arg.C = C1;
++        arg.H = H1;
++        arg.W = W1;
++
++        arg.grid_dim[0] = W2;
++        arg.grid_dim[1] = H2;
++        arg.grid_dim[2] = C1;
++
++        RT_CHECK(vx_upload_bytes(device, &arg, sizeof(arg), &args_buf));
++        RT_CHECK(vx_start(device, pool_bin, args_buf));
++        RT_CHECK(vx_ready_wait(device, VX_MAX_TIMEOUT));
++    }
++
++
++    // ------------------------------------------------------------
++    // download final output (C1×H2×W2)
++    // ------------------------------------------------------------
++    RT_CHECK(vx_copy_from_dev(h_O2.data(), O2_buf, 0, h_O2.size()*4));
++
++
++    // ------------------------------------------------------------
++    // CPU reference: conv → relu → pool
++    // ------------------------------------------------------------
++    std::vector<float> tmp1(C1 * H1 * W1);
++    std::vector<float> tmp2(C1 * H2 * W2);
++
++    conv_cpu(tmp1, h_I, h_W, C_IN, C_OUT, H, W, padding, stride);
++    relu_cpu(tmp1);
++    maxpool_cpu(tmp2, tmp1, C1, H1, W1);
++
++    // compare GPU vs CPU
++    int errors = 0;
++    for (size_t i = 0; i < tmp2.size(); i++) {
++        float a = h_O2[i];
++        float b = tmp2[i];
++
++        union { float f; int i; } fa{a}, fb{b};
++        if (std::abs(fa.i - fb.i) > FLOAT_ULP) {
++            if (errors < 50)
++                printf("*** error [%zu] GPU=%f CPU=%f\n", i, a, b);
++            errors++;
++        }
++    }
++
++    if (errors == 0)
++        printf("CNN PASSED!\n");
++    else
++        printf("CNN FAILED with %d errors\n", errors);
++
++    cleanup();
++    return errors;
++}
+diff --git a/tests/regression/cnn_pool/Makefile b/tests/regression/cnn_pool/Makefile
+new file mode 100644
+index 000000000..f7f946355
+--- /dev/null
++++ b/tests/regression/cnn_pool/Makefile
+@@ -0,0 +1,14 @@
++ROOT_DIR := $(realpath ../../..)
++include $(ROOT_DIR)/config.mk
++
++PROJECT := cnn_pool
++SRC_DIR := $(VORTEX_HOME)/tests/regression/$(PROJECT)
++
++# Host program
++SRCS := $(SRC_DIR)/main.cpp
++
++# Device kernels (all compiled into one kernel.elf)
++VX_SRCS := \
++    $(SRC_DIR)/kernel_conv.cpp \
++
++include ../common.mk
+diff --git a/tests/regression/cnn_pool/common.h b/tests/regression/cnn_pool/common.h
+new file mode 100644
+index 000000000..8ce10321b
+--- /dev/null
++++ b/tests/regression/cnn_pool/common.h
+@@ -0,0 +1,54 @@
++#ifndef _COMMON_H_
++#define _COMMON_H_
++
++#ifndef TYPE
++#define TYPE float   // can be overridden at compile time
++#endif
++
++#include <stdint.h>
++
++typedef struct {
++  // Device pointers
++  uint64_t I_addr;   // Input address [C_in][H][W]
++  uint64_t W_addr;   // Weight address [C_out][C_in][3][3]
++  uint64_t O_addr;   // Output address [C_out][H_out][W_out]
++
++  // Convolution parameters
++  uint32_t C_in;     // Input channels
++  uint32_t C_out;    // Output channels
++  uint32_t height;   // Input height
++  uint32_t width;    // Input width
++  uint32_t padding;  // Padding (same on all sides)
++  uint32_t stride;   // Stride (currently assumed square)
++  
++  // Derived output dimensions
++  uint32_t H_out;
++  uint32_t W_out;
++
++  // Execution configuration
++  uint32_t grid_dim[3];   // [W_out, H_out, C_out]
++  uint32_t block_dim[3];  // (not used in Vortex, but included for compatibility)
++
++  // Flags
++  uint32_t use_lmem;      // 1: copy weights into local memory, 0: use device memory
++} kernel_arg_t;
++
++typedef struct {
++    uint64_t X_addr;     // Activation in/out (in-place)
++    uint32_t total;      // Total elements = C×H×W
++    uint32_t grid_dim[3];
++    uint32_t block_dim[3];
++} kernel_arg_relu_t;
++
++typedef struct {
++    uint64_t I_addr;
++    uint64_t O_addr;
++    uint32_t C;
++    uint32_t H;
++    uint32_t W;
++    uint32_t grid_dim[3];
++    uint32_t block_dim[3];
++} kernel_arg_pool_t;
++
++
++#endif // _COMMON_H_
+diff --git a/tests/regression/cnn_pool/kernel_pool.cpp b/tests/regression/cnn_pool/kernel_pool.cpp
+new file mode 100644
+index 000000000..a26c79618
+--- /dev/null
++++ b/tests/regression/cnn_pool/kernel_pool.cpp
+@@ -0,0 +1,39 @@
++#include <vx_spawn.h>
++#include "common.h"
++
++void kernel_body(kernel_arg_pool_t* __UNIFORM__ arg) {
++    auto I = reinterpret_cast<float*>(arg->I_addr);
++    auto O = reinterpret_cast<float*>(arg->O_addr);
++
++    int C = arg->C;
++    int H = arg->H;
++    int W = arg->W;
++
++    int H_out = H/2;
++    int W_out = W/2;
++
++    int ox = blockIdx.x;
++    int oy = blockIdx.y;
++
++    if (ox>=W_out || oy>=H_out) return;
++    for (int oc = 0; oc < 4; oc++) {
++        float m = -1e30f;
++        for(int ky=0; ky<2; ky++){
++            for(int kx=0; kx<2; kx++){
++                int iy = oy*2 + ky;
++                int ix = ox*2 + kx;
++                float v = I[oc*H*W + iy*W + ix];
++                if(v > m) m = v;
++            }
++        }
++
++        O[oc*H_out*W_out + oy*W_out + ox] = m;
++
++    }
++}
++
++int main(){
++    auto arg = (kernel_arg_pool_t*)csr_read(VX_CSR_MSCRATCH);
++    return vx_spawn_threads(2, arg->grid_dim, nullptr,
++                            (vx_kernel_func_cb)kernel_body, arg);
++}
+diff --git a/tests/regression/cnn_pool/main.cpp b/tests/regression/cnn_pool/main.cpp
+new file mode 100644
+index 000000000..a6eb13bc9
+--- /dev/null
++++ b/tests/regression/cnn_pool/main.cpp
+@@ -0,0 +1,93 @@
++#include <iostream>
++#include <vector>
++#include <cmath>
++#include <vortex.h>
++#include "common.h"
++
++#define RT(x) if(x){printf("ERR %s\n",#x);exit(1);}
++
++vx_device_h device=nullptr;
++vx_buffer_h I_buf=nullptr;
++vx_buffer_h O_buf=nullptr;
++vx_buffer_h bin_buf=nullptr;
++vx_buffer_h arg_buf=nullptr;
++
++void cleanup(){
++    if(device){
++        vx_mem_free(I_buf);
++        vx_mem_free(O_buf);
++        vx_mem_free(bin_buf);
++        vx_mem_free(arg_buf);
++        vx_dev_close(device);
++    }
++}
++
++int main(){
++    RT(vx_dev_open(&device));
++
++    int C=4, H=32, W=32;
++    int H2=H/2, W2=W/2;
++
++    std::vector<float> I(C*H*W);
++    std::vector<float> O(C*H2*W2);
++    std::vector<float> ref(C*H2*W2);
++
++    for(auto& v : I) v = rand()/float(RAND_MAX);
++
++    // CPU
++    for(int oc=0;oc<C;oc++){
++        for(int oy=0;oy<H2;oy++){
++            for(int ox=0;ox<W2;ox++){
++                float m=-1e30f;
++                for(int ky=0;ky<2;ky++){
++                    for(int kx=0;kx<2;kx++){
++                        int iy=2*oy+ky, ix=2*ox+kx;
++                        float v=I[oc*H*W+iy*W+ix];
++                        if(v>m) m=v;
++                    }
++                }
++                ref[oc*H2*W2+oy*W2+ox]=m;
++            }
++        }
++    }
++
++    RT(vx_mem_alloc(device,I.size()*4,VX_MEM_READ,&I_buf));
++    RT(vx_mem_alloc(device,O.size()*4,VX_MEM_WRITE,&O_buf));
++
++    uint64_t I_addr,O_addr;
++    vx_mem_address(I_buf,&I_addr);
++    vx_mem_address(O_buf,&O_addr);
++
++    RT(vx_copy_to_dev(I_buf,I.data(),0,I.size()*4));
++    RT(vx_upload_kernel_file(device,"kernel.vxbin",&bin_buf));
++
++    kernel_arg_pool_t arg{};
++    arg.I_addr=I_addr;
++    arg.O_addr=O_addr;
++    arg.C=C; arg.H=H; arg.W=W;
++
++    arg.grid_dim[0]=W2;
++    arg.grid_dim[1]=H2;
++    arg.grid_dim[2]=C;
++
++    RT(vx_upload_bytes(device,&arg,sizeof(arg),&arg_buf));
++    RT(vx_start(device,bin_buf,arg_buf));
++    RT(vx_ready_wait(device,VX_MAX_TIMEOUT));
++
++    RT(vx_copy_from_dev(O.data(),O_buf,0,O.size()*4));
++
++    int errors=0;
++    printf("Size of Output: %d\n",O.size());
++    for(size_t i=0;i<O.size();i++){
++        if(fabs(O[i]-ref[i])>1e-5){
++            if(errors<20)
++                printf("ERR[%zu]: GPU=%f CPU=%f\n",i,O[i],ref[i]);
++            errors++;
++        }
++    }
++
++    cleanup();
++    if(errors==0) printf("POOL PASSED\n");
++    else printf("POOL FAILED %d errors\n",errors);
++    return errors;
++}
+diff --git a/tests/regression/cnn_relu/Makefile b/tests/regression/cnn_relu/Makefile
+new file mode 100644
+index 000000000..d7c5ecf98
+--- /dev/null
++++ b/tests/regression/cnn_relu/Makefile
+@@ -0,0 +1,14 @@
++ROOT_DIR := $(realpath ../../..)
++include $(ROOT_DIR)/config.mk
++
++PROJECT := cnn_relu
++SRC_DIR := $(VORTEX_HOME)/tests/regression/$(PROJECT)
++
++# Host program
++SRCS := $(SRC_DIR)/main.cpp
++
++# Device kernels (all compiled into one kernel.elf)
++VX_SRCS := \
++    $(SRC_DIR)/kernel_conv.cpp \
++
++include ../common.mk
+diff --git a/tests/regression/cnn_relu/common.h b/tests/regression/cnn_relu/common.h
+new file mode 100644
+index 000000000..8ce10321b
+--- /dev/null
++++ b/tests/regression/cnn_relu/common.h
+@@ -0,0 +1,54 @@
++#ifndef _COMMON_H_
++#define _COMMON_H_
++
++#ifndef TYPE
++#define TYPE float   // can be overridden at compile time
++#endif
++
++#include <stdint.h>
++
++typedef struct {
++  // Device pointers
++  uint64_t I_addr;   // Input address [C_in][H][W]
++  uint64_t W_addr;   // Weight address [C_out][C_in][3][3]
++  uint64_t O_addr;   // Output address [C_out][H_out][W_out]
++
++  // Convolution parameters
++  uint32_t C_in;     // Input channels
++  uint32_t C_out;    // Output channels
++  uint32_t height;   // Input height
++  uint32_t width;    // Input width
++  uint32_t padding;  // Padding (same on all sides)
++  uint32_t stride;   // Stride (currently assumed square)
++  
++  // Derived output dimensions
++  uint32_t H_out;
++  uint32_t W_out;
++
++  // Execution configuration
++  uint32_t grid_dim[3];   // [W_out, H_out, C_out]
++  uint32_t block_dim[3];  // (not used in Vortex, but included for compatibility)
++
++  // Flags
++  uint32_t use_lmem;      // 1: copy weights into local memory, 0: use device memory
++} kernel_arg_t;
++
++typedef struct {
++    uint64_t X_addr;     // Activation in/out (in-place)
++    uint32_t total;      // Total elements = C×H×W
++    uint32_t grid_dim[3];
++    uint32_t block_dim[3];
++} kernel_arg_relu_t;
++
++typedef struct {
++    uint64_t I_addr;
++    uint64_t O_addr;
++    uint32_t C;
++    uint32_t H;
++    uint32_t W;
++    uint32_t grid_dim[3];
++    uint32_t block_dim[3];
++} kernel_arg_pool_t;
++
++
++#endif // _COMMON_H_
+diff --git a/tests/regression/cnn_relu/kernel_relu.cpp b/tests/regression/cnn_relu/kernel_relu.cpp
+new file mode 100644
+index 000000000..146f283c4
+--- /dev/null
++++ b/tests/regression/cnn_relu/kernel_relu.cpp
+@@ -0,0 +1,26 @@
++#include <vx_spawn.h>
++#include "common.h"
++
++void kernel_body(kernel_arg_relu_t* __UNIFORM__ arg) {
++    auto X = reinterpret_cast<float*>(arg->X_addr);
++    int total = arg->total;
++
++    int idx = blockIdx.x;
++    if (idx >= total) return;
++
++    float v = X[idx];
++    if (v < 0) v = 0;
++    X[idx] = v;
++}
++
++int main() {
++    auto arg = (kernel_arg_relu_t*)csr_read(VX_CSR_MSCRATCH);
++
++    return vx_spawn_threads(
++        1,
++        arg->grid_dim,
++        arg->block_dim,
++        (vx_kernel_func_cb)kernel_body,
++        arg
++    );
++}
+diff --git a/tests/regression/cnn_relu/main.cpp b/tests/regression/cnn_relu/main.cpp
+new file mode 100644
+index 000000000..61c5238f0
+--- /dev/null
++++ b/tests/regression/cnn_relu/main.cpp
+@@ -0,0 +1,77 @@
++#include <iostream>
++#include <vector>
++#include <cmath>
++#include <vortex.h>
++#include "common.h"
++
++#define FLOAT_ULP 6
++#define RT(x) if (x) { std::cout<<"ERR "<<#x<<"\n"; exit(1); }
++
++template <typename T>
++static bool cmp(T a, T b) {
++    union { float f; int32_t i; } fa{a}, fb{b};
++    return std::abs(fa.i - fb.i) <= FLOAT_ULP;
++}
++
++vx_device_h device=nullptr;
++vx_buffer_h X_buf=nullptr;
++vx_buffer_h bin_buf=nullptr;
++vx_buffer_h arg_buf=nullptr;
++
++void cleanup(){
++    if(device){
++        vx_mem_free(X_buf);
++        vx_mem_free(bin_buf);
++        vx_mem_free(arg_buf);
++        vx_dev_close(device);
++    }
++}
++
++int main(){
++    RT(vx_dev_open(&device));
++
++    int total = 1024;
++    std::vector<float> h_X(total);
++    std::vector<float> ref(total);
++
++    for(int i=0;i<total;i++){
++        h_X[i] = (rand() / float(RAND_MAX))*2 - 1;
++        ref[i] = h_X[i] < 0 ? 0 : h_X[i];
++    }
++
++    RT(vx_mem_alloc(device,total*4,VX_MEM_READ|VX_MEM_WRITE,&X_buf));
++
++    uint64_t X_addr;
++    vx_mem_address(X_buf,&X_addr);
++
++    RT(vx_copy_to_dev(X_buf,h_X.data(),0,total*4));
++
++    RT(vx_upload_kernel_file(device,"kernel.vxbin",&bin_buf));
++
++    kernel_arg_relu_t arg{};
++    arg.X_addr = X_addr;
++    arg.total  = total;
++    arg.grid_dim[0] = total;
++
++    RT(vx_upload_bytes(device,&arg,sizeof(arg),&arg_buf));
++    RT(vx_start(device,bin_buf,arg_buf));
++    RT(vx_ready_wait(device,VX_MAX_TIMEOUT));
++
++    RT(vx_copy_from_dev(h_X.data(),X_buf,0,total*4));
++
++    int errors=0;
++    for(int i=0;i<total;i++){
++        if(!cmp(h_X[i],ref[i])){
++            if(errors<20)
++                printf("Mismatch [%d] GPU=%f CPU=%f\n",i,h_X[i],ref[i]);
++            errors++;
++        }
++    }
++
++    cleanup();
++
++    if(errors==0) printf("ReLU PASSED\n");
++    else printf("ReLU FAILED %d errors\n",errors);
++
++    return errors;
++}
