@@ -96,6 +96,8 @@ set_app_path() {
         APP_PATH="$ROOT_DIR/tests/opencl/$APP"
     elif [ -d "$ROOT_DIR/tests/hip/$APP" ]; then
         APP_PATH="$ROOT_DIR/tests/hip/$APP"
+    elif [ -d "$ROOT_DIR/demos/cnn/$APP" ]; then
+        APP_PATH="$ROOT_DIR/demos/cnn/$APP"
     else
         echo "Application folder not found: $APP"
         exit 1

@@ -2,7 +2,7 @@ ROOT_DIR := $(realpath ../../..)
 include $(ROOT_DIR)/config.mk
 
 PROJECT := cnn_conv
-SRC_DIR := $(VORTEX_HOME)/tests/regression/$(PROJECT)
+SRC_DIR := $(VORTEX_HOME)/demos/cnn/$(PROJECT)
 
 # Host program
 SRCS := $(SRC_DIR)/main_old.cpp
