@@ -1,8 +1,9 @@
-VORTEX_RT_PATH ?= $(ROOT_DIR)/runtime
-VORTEX_KN_PATH ?= $(ROOT_DIR)/kernel
+ROOT_DIR := $(realpath ../..)
+
 include $(ROOT_DIR)/config.mk
 
-ROOT_DIR := $(realpath ../..)
+VORTEX_RT_PATH ?= $(ROOT_DIR)/runtime
+VORTEX_KN_PATH ?= $(ROOT_DIR)/kernel
 
 PROJECT := CNN
 
