@@ -9,6 +9,7 @@ all:
 	$(MAKE) -C kernel
 	$(MAKE) -C runtime
 	$(MAKE) -C tests
+	$(MAKE) -C demo
 
 build:
 	$(MAKE) -C hw
@@ -16,6 +17,7 @@ build:
 	$(MAKE) -C kernel
 	$(MAKE) -C runtime
 	$(MAKE) -C tests
+	$(MAKE) -C demo
 
 software:
 	$(MAKE) -C hw
@@ -25,12 +27,16 @@ software:
 tests:
 	$(MAKE) -C tests
 
+demo:
+	$(MAKE) -C demo
+
 clean-build:
 	$(MAKE) -C hw clean
 	$(MAKE) -C sim clean
 	$(MAKE) -C kernel clean
 	$(MAKE) -C runtime clean
 	$(MAKE) -C tests clean
+	$(MAKE) -C demo clean
 
 clean: clean-build
 	$(MAKE) -C $(VORTEX_HOME)/third_party clean
