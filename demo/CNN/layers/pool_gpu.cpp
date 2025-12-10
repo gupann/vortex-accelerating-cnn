@@ -1,5 +1,5 @@
 #include "../cnn_pipeline.h"
-#include "../common.h"     // must contain kernel_arg_pool_t definition
+#include "../common.h"
 #include <iostream>
 #include <vortex.h>
 

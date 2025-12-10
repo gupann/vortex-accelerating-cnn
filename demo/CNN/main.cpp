@@ -6,7 +6,6 @@
 
 //
 // Paths to compiled kernels
-// (adjust these to match your build output)
 //
 static const char* CONV_KERNEL  = "layers/conv_kernel.vxbin";
 static const char* POOL_KERNEL  = "layers/pool_kernel.vxbin";

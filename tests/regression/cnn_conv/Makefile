@@ -5,7 +5,7 @@ PROJECT := cnn_conv
 SRC_DIR := $(VORTEX_HOME)/tests/regression/$(PROJECT)
 
 # Host program
-SRCS := $(SRC_DIR)/main_old.cpp
+SRCS := $(SRC_DIR)/main.cpp
 
 # Device kernels (all compiled into one kernel.elf)
 VX_SRCS := \

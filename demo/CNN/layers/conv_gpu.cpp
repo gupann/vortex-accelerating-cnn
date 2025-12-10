@@ -1,12 +1,9 @@
 #include "../cnn_pipeline.h"
-#include "../common.h"          // <-- This must contain kernel_arg_t for conv3
+#include "../common.h"
 #include <iostream>
 #include <vortex.h>
 
-// ------------------------------------------------------------
 // GPU Convolution Wrapper
-// ------------------------------------------------------------
-//
 // input:  Tensor with C=1, H=28, W=28  (Fashion-MNIST)
 // W:      vector (C_out * C_in * 3 * 3)
 // B:      vector (C_out)
@@ -15,10 +12,8 @@
 // padding: 0 for "valid"
 // stride:   1
 // kernel_file: "conv_kernel.vxbin"
-//
 // Returns: Tensor(C_out, H_out, W_out)
 //          H_out = (H + 2*padding - K)/stride + 1
-// ------------------------------------------------------------
 
 Tensor conv2d_gpu(VortexDevice& vx,
                   const Tensor& input,
@@ -40,9 +35,7 @@ Tensor conv2d_gpu(VortexDevice& vx,
     // Allocate output tensor
     Tensor output(C_out, H_out, W_out);
 
-    //
-    // --- Upload input + weights + allocate output ---
-    //
+    // --- Upload input + weights + allocate output
     vx_buffer_h I_buf, W_buf, O_buf, B_buf;
 
     // Upload input tensor
@@ -61,9 +54,7 @@ Tensor conv2d_gpu(VortexDevice& vx,
     uint64_t O_addr;
     vx.check(vx_mem_address(O_buf, &O_addr), "O_addr");
 
-    //
-    // --- Fill kernel_arg_t exactly like your regression tests ---
-    //
+    // --- Fill kernel_arg_t ---
     kernel_arg_conv_t arg{};
     arg.C_in    = C_in;
     arg.C_out   = C_out;
@@ -78,52 +69,38 @@ Tensor conv2d_gpu(VortexDevice& vx,
     arg.I_addr = I_addr;
     arg.W_addr = W_addr;
     arg.O_addr = O_addr;
-    arg.B_addr = B_addr;  // If your kernel uses biases; otherwise ignore.
+    arg.B_addr = B_addr;
 
-    //
-    // Grid: Your kernel uses only blockIdx.x, blockIdx.y.
+    // Grid: our kernel uses only blockIdx.x, blockIdx.y.
     //       blockIdx.z is unused, so grid_dim[2] = 1.
-    //
-    arg.grid_dim[0] = W_out;
-    arg.grid_dim[1] = H_out;
+    arg.grid_dim[0] = W_out; // 26
+    arg.grid_dim[1] = H_out; // 26
     arg.grid_dim[2] = 1;
 
     arg.block_dim[0] = 1;
     arg.block_dim[1] = 1;
     arg.block_dim[2] = 1;
 
-    //
     // Upload kernel arguments
-    //
     vx_buffer_h arg_buf;
     vx.check(vx_upload_bytes(vx.dev, &arg, sizeof(arg), &arg_buf),
              "upload conv args");
 
-    //
     // Upload kernel binary
-    //
     vx_buffer_h bin_buf;
     vx.check(vx_upload_kernel_file(vx.dev, kernel_file, &bin_buf),
              "upload conv vxbin");
 
-    //
     // Launch kernel
-    //
     vx.check(vx_start(vx.dev, bin_buf, arg_buf), "start conv kernel");
 
-    //
     // Wait for GPU
-    //
     vx.check(vx_ready_wait(vx.dev, VX_MAX_TIMEOUT), "conv wait");
 
-    //
     // Download output
-    //
     download_tensor_from_device(vx, output, O_buf);
 
-    //
     // Free temp buffers
-    //
     vx_mem_free(I_buf);
     vx_mem_free(W_buf);
     vx_mem_free(B_buf);

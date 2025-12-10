@@ -94,8 +94,8 @@ OPTS ?= -n64
 # include ../common.mk
 
 # what we want is to run sim-x 
-run-simx: $(PROJECT)
-	LD_LIBRARY_PATH=$(VORTEX_RT_PATH):$(LD_LIBRARY_PATH) VORTEX_DRIVER=simx ./$(PROJECT) $(OPTS)
+# run-simx: $(PROJECT)
+# 	LD_LIBRARY_PATH=$(VORTEX_RT_PATH):$(LD_LIBRARY_PATH) VORTEX_DRIVER=simx ./$(PROJECT) $(OPTS)
 
 DATA_DIR := $(VORTEX_HOME)/demo/$(PROJECT)
 

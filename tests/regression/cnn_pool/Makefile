@@ -9,6 +9,6 @@ SRCS := $(SRC_DIR)/main.cpp
 
 # Device kernels (all compiled into one kernel.elf)
 VX_SRCS := \
-    $(SRC_DIR)/kernel_conv.cpp \
+    $(SRC_DIR)/kernel_pool.cpp \
 
 include ../common.mk
