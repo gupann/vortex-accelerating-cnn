@@ -76,6 +76,7 @@ LDFLAGS += -L$(VORTEX_RT_PATH) -lvortex
 SRC_DIR := $(VORTEX_HOME)/demo/$(PROJECT)
 SRCS := \
     $(SRC_DIR)/main.cpp \
+	$(SRC_DIR)/cnn_pipeline.cpp \
     $(SRC_DIR)/layers/conv_gpu.cpp \
     $(SRC_DIR)/layers/pool_gpu.cpp \
     $(SRC_DIR)/layers/relu_gpu.cpp \
@@ -94,4 +95,16 @@ OPTS ?= -n64
 
 # what we want is to run sim-x 
 run-simx: $(PROJECT)
+	LD_LIBRARY_PATH=$(VORTEX_RT_PATH):$(LD_LIBRARY_PATH) VORTEX_DRIVER=simx ./$(PROJECT) $(OPTS)
+
+DATA_DIR := $(VORTEX_HOME)/demo/$(PROJECT)
+
+.PHONY: run-simx prepare-data
+
+prepare-data:
+	@if [ ! -e images ]; then ln -s $(DATA_DIR)/images .; fi
+	@if [ ! -e weights ]; then ln -s $(DATA_DIR)/weights .; fi
+	@if [ ! -e layers ]; then ln -s $(DATA_DIR)/layers .; fi
+
+run-simx: prepare-data $(PROJECT)
 	LD_LIBRARY_PATH=$(VORTEX_RT_PATH):$(LD_LIBRARY_PATH) VORTEX_DRIVER=simx ./$(PROJECT) $(OPTS)
