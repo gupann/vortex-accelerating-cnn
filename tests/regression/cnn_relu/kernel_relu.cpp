@@ -2,14 +2,16 @@
 #include "common.h"
 
 void kernel_body(kernel_arg_relu_t* __UNIFORM__ arg) {
-    auto X = reinterpret_cast<float*>(arg->X_addr);
+    TYPE* X = reinterpret_cast<TYPE*>(arg->X_addr);
     int total = arg->total;
 
     int idx = blockIdx.x;
     if (idx >= total) return;
 
-    float v = X[idx];
-    if (v < 0) v = 0;
+    TYPE v = X[idx];
+    if (v < (TYPE)0) 
+        v = (TYPE)0;
+
     X[idx] = v;
 }
 

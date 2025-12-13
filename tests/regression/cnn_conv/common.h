@@ -11,6 +11,7 @@ typedef struct {
   // Device pointers
   uint64_t I_addr;   // Input address [C_in][H][W]
   uint64_t W_addr;   // Weight address [C_out][C_in][3][3]
+  uint64_t B_addr;   // Bias address [C_out]
   uint64_t O_addr;   // Output address [C_out][H_out][W_out]
 
   // Convolution parameters

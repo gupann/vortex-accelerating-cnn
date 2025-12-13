@@ -4,16 +4,16 @@
 #include <vortex.h>
 
 // ------------------------------------------------------------
-// GPU ReLU Wrapper
+// GPU ReLU Wrapper (in-place on device buffer)
 // ------------------------------------------------------------
 //
 // input:  Tensor(C, H, W)
 // output: Tensor(C, H, W)
+// kernel_file: e.g. "layers/relu_kernel.vxbin"
 //
-// kernel_file: e.g. "relu_kernel.vxbin"
-//
-// Your device kernel should do: O[i] = max(0, I[i])
-// Grid: 2D = (W, H), channel loop inside kernel
+// This matches regression/cnn_relu/common.h + kernel:
+//   - kernel_arg_relu_t { X_addr, total, grid_dim, block_dim }
+//   - kernel_body uses X[idx] in-place
 // ------------------------------------------------------------
 
 Tensor relu_gpu(VortexDevice& vx,
@@ -23,78 +23,72 @@ Tensor relu_gpu(VortexDevice& vx,
     int C = input.C;
     int H = input.H;
     int W = input.W;
+    int total = C * H * W;
 
     Tensor output(C, H, W);
 
-    //
-    // --- Upload input & allocate output ---
-    //
-    vx_buffer_h I_buf, O_buf;
+    // --- Allocate RW buffer and upload input ---
+    vx_buffer_h X_buf;
+    size_t nbytes = input.data.size() * sizeof(float);
 
-    uint64_t I_addr = upload_tensor_to_device(vx, input, &I_buf);
+    vx.check(
+        vx_mem_alloc(vx.dev, nbytes, VX_MEM_READ | VX_MEM_WRITE, &X_buf),
+        "relu alloc X_buf"
+    );
 
-    size_t o_nbytes = output.data.size() * sizeof(float);
-    vx.check(vx_mem_alloc(vx.dev, o_nbytes, VX_MEM_WRITE, &O_buf),
-             "relu alloc O_buf");
-    uint64_t O_addr;
-    vx.check(vx_mem_address(O_buf, &O_addr), "relu O_addr");
+    uint64_t X_addr;
+    vx.check(vx_mem_address(X_buf, &X_addr), "relu X_addr");
 
-    //
+    vx.check(
+        vx_copy_to_dev(X_buf, input.data.data(), 0, nbytes),
+        "relu copy input to dev"
+    );
+
     // --- Fill kernel_arg_relu_t ---
-    //
     kernel_arg_relu_t arg{};
-    arg.I_addr = I_addr;
-    arg.O_addr = O_addr;
-    arg.C      = C;
-    arg.H      = H;
-    arg.W      = W;
-
-    // grid = {W, H, 1}
-    arg.grid_dim[0] = W;
-    arg.grid_dim[1] = H;
-    arg.grid_dim[2] = 1;
-
-    // block = {1,1,1}
+    arg.X_addr       = X_addr;
+    arg.total        = total;
+    arg.grid_dim[0]  = total;  // 1D grid: one thread per element
+    arg.grid_dim[1]  = 1;
+    arg.grid_dim[2]  = 1;
     arg.block_dim[0] = 1;
     arg.block_dim[1] = 1;
     arg.block_dim[2] = 1;
 
-    //
-    // Upload args
-    //
+    // --- Upload args ---
     vx_buffer_h arg_buf;
-    vx.check(vx_upload_bytes(vx.dev, &arg, sizeof(arg), &arg_buf),
-             "upload relu args");
+    vx.check(
+        vx_upload_bytes(vx.dev, &arg, sizeof(arg), &arg_buf),
+        "upload relu args"
+    );
 
-    //
-    // Upload kernel bin
-    //
+    // --- Upload kernel binary ---
     vx_buffer_h bin_buf;
-    vx.check(vx_upload_kernel_file(vx.dev, kernel_file, &bin_buf),
-             "upload relu kernel");
+    vx.check(
+        vx_upload_kernel_file(vx.dev, kernel_file, &bin_buf),
+        "upload relu kernel"
+    );
 
-    //
-    // Launch
-    //
-    vx.check(vx_start(vx.dev, bin_buf, arg_buf),
-             "start relu kernel");
+    // --- Launch kernel ---
+    vx.check(
+        vx_start(vx.dev, bin_buf, arg_buf),
+        "start relu kernel"
+    );
 
-    //
-    // Wait for device
-    //
-    vx.check(vx_ready_wait(vx.dev, VX_MAX_TIMEOUT),
-             "relu wait");
+    // --- Wait for device ---
+    vx.check(
+        vx_ready_wait(vx.dev, VX_MAX_TIMEOUT),
+        "relu wait"
+    );
 
-    //
-    // Download result
-    //
-    download_tensor_from_device(vx, output, O_buf);
+    // --- Download result into output tensor ---
+    vx.check(
+        vx_copy_from_dev(output.data.data(), X_buf, 0, nbytes),
+        "relu download output"
+    );
 
-    //
-    // Cleanup
-    //
-    vx_mem_free(I_buf);
-    vx_mem_free(O_buf);
+    // --- Cleanup ---
+    vx_mem_free(X_buf);
     vx_mem_free(arg_buf);
     vx_mem_free(bin_buf);
 

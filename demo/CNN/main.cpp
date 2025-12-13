@@ -25,6 +25,19 @@ static const char* FC_B_FILE    = "weights/fc_b.bin";
 //
 static const char* IMAGE_FILE   = "images/test_image.bin";
 
+static const char* LABEL_FILE   = "images/test_label.txt";
+
+int load_label(const std::string& path) {
+    std::ifstream f(path);
+    if (!f) {
+        std::cerr << "Cannot open: " << path << "\n";
+        exit(1);
+    }
+    int y;
+    f >> y;
+    return y;
+}
+
 //
 // ------------------------------------------------------------
 // Load a 28×28 Fashion-MNIST image from .bin (float32)
@@ -129,6 +142,24 @@ int main() {
 
     std::vector<float> probs = softmax(logits);
     int pred = argmax(probs);
+        
+    int label = load_label(LABEL_FILE);
+
+    static const char* class_names[10] = {
+        "T-shirt/top", "Trouser", "Pullover", "Dress", "Coat",
+        "Sandal", "Shirt", "Sneaker", "Bag", "Ankle boot"
+    };
+
+    std::cout << "Ground truth: " << label
+            << " (" << class_names[label] << ")\n";
+    std::cout << "Prediction : " << pred
+            << " (" << class_names[pred] << ")\n";
+
+    if (label == pred)
+        std::cout << "Result: CORRECT\n";
+    else
+        std::cout << "Result: WRONG\n";
+
 
     //
     // Print results

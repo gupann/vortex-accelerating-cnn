@@ -3,18 +3,6 @@
 #include <iostream>
 #include <vortex.h>
 
-// GPU Convolution Wrapper
-// input:  Tensor with C=1, H=28, W=28  (Fashion-MNIST)
-// W:      vector (C_out * C_in * 3 * 3)
-// B:      vector (C_out)
-// C_out:  e.g. 8
-// K:      kernel size = 3
-// padding: 0 for "valid"
-// stride:   1
-// kernel_file: "conv_kernel.vxbin"
-// Returns: Tensor(C_out, H_out, W_out)
-//          H_out = (H + 2*padding - K)/stride + 1
-
 Tensor conv2d_gpu(VortexDevice& vx,
                   const Tensor& input,
                   const std::vector<float>& W,
@@ -35,51 +23,43 @@ Tensor conv2d_gpu(VortexDevice& vx,
     // Allocate output tensor
     Tensor output(C_out, H_out, W_out);
 
-    // --- Upload input + weights + allocate output
-    vx_buffer_h I_buf, W_buf, O_buf, B_buf;
+    // --- Upload input + weights + biases + allocate output
+    vx_buffer_h I_buf, W_buf, B_buf, O_buf;
 
-    // Upload input tensor
     uint64_t I_addr = upload_tensor_to_device(vx, input, &I_buf);
-
-    // Upload weights
     uint64_t W_addr = upload_weights_to_device(vx, W, &W_buf);
-
-    // Upload bias vector
     uint64_t B_addr = upload_weights_to_device(vx, B, &B_buf);
 
-    // Allocate output buffer
     size_t o_nbytes = output.data.size() * sizeof(float);
     vx.check(vx_mem_alloc(vx.dev, o_nbytes, VX_MEM_WRITE, &O_buf),
              "alloc O_buf");
     uint64_t O_addr;
     vx.check(vx_mem_address(O_buf, &O_addr), "O_addr");
 
-    // --- Fill kernel_arg_t ---
-    kernel_arg_conv_t arg{};
-    arg.C_in    = C_in;
-    arg.C_out   = C_out;
-    arg.H       = H;
-    arg.W       = Wt;
-    arg.padding = padding;
-    arg.stride  = stride;
-    arg.H_out   = H_out;
-    arg.W_out   = W_out;
+    // --- Fill kernel_arg_t exactly like regression test ---
+    kernel_arg_t arg{};
+    arg.I_addr   = I_addr;
+    arg.W_addr   = W_addr;
+    arg.B_addr   = B_addr;
+    arg.O_addr   = O_addr;
 
+    arg.C_in     = C_in;
+    arg.C_out    = C_out;
+    arg.height   = H;
+    arg.width    = Wt;
+    arg.padding  = padding;
+    arg.stride   = stride;
+    arg.H_out    = H_out;
+    arg.W_out    = W_out;
 
-    arg.I_addr = I_addr;
-    arg.W_addr = W_addr;
-    arg.O_addr = O_addr;
-    arg.B_addr = B_addr;
-
-    // Grid: our kernel uses only blockIdx.x, blockIdx.y.
-    //       blockIdx.z is unused, so grid_dim[2] = 1.
-    arg.grid_dim[0] = W_out; // 26
-    arg.grid_dim[1] = H_out; // 26
-    arg.grid_dim[2] = 1;
-
+    arg.grid_dim[0] = W_out;
+    arg.grid_dim[1] = H_out;
+    arg.grid_dim[2] = C_out;  // z is not used by kernel, but this matches regression
     arg.block_dim[0] = 1;
     arg.block_dim[1] = 1;
     arg.block_dim[2] = 1;
+
+    arg.use_lmem = 0; // use global memory like in regression host
 
     // Upload kernel arguments
     vx_buffer_h arg_buf;
