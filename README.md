@@ -7,6 +7,8 @@ The work is divided into two parts:
 1. A **fully functional CNN inference pipeline** running on Vortex GPU kernels.  
 2. A **tensor-core-accelerated SGEMM kernel** used to evaluate the performance potential of WMMA for CNN workloads.
 
+**Slides:** [Presentation](https://docs.google.com/presentation/d/16v4S7cEtVrpoikDRdTHzFyBff66ID1WVYZXL_87Vwjo/edit?usp=sharing)
+
 ---
 
 ## Project Overview
